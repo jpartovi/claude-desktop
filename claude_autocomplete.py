@@ -34,27 +34,39 @@ class AutocompleteTextEdit(QTextEdit):
         self.is_updating = False
         self.current_suggestion = ""
         self.current_text = ""
-        self.setMinimumWidth(600)
-        self.setMinimumHeight(200)
-        self.setPlaceholderText("Type here to see suggestions...")
+        self.setMinimumWidth(200)
+        self.setMaximumWidth(400)
+        self.setMinimumHeight(40)
+        self.setMaximumHeight(400)
+        self.setPlaceholderText("Type for suggestions (Tab to accept)")
+        self.document().documentLayout().documentSizeChanged.connect(self.adjust_height)
         
-        # Set font
-        font = QFont("SF Pro Display, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen, Ubuntu, Cantarell, Open Sans, Helvetica Neue, sans-serif", 14)
+        font = QFont("Helvetica Neue", 14)
         self.setFont(font)
         
         self.setStyleSheet("""
             QTextEdit {
-                padding: 15px;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                background-color: #ffffff;
+                padding: 8px 12px;
+                border: 1.5px solid #e0e0e0;
+                border-radius: 12px;
+                background-color: rgba(255, 255, 255, 0.95);
                 color: #2c3e50;
                 selection-background-color: #bdc3c7;
             }
             QTextEdit:focus {
-                border: 2px solid #3498db;
+                border: 1.5px solid #3498db;
+                background-color: white;
             }
         """)
+
+    def adjust_height(self):
+        doc_height = self.document().size().height()
+        margins = self.contentsMargins()
+        required_height = doc_height + margins.top() + margins.bottom() + 20
+        new_height = max(40, min(required_height, 400))
+        self.setFixedHeight(int(new_height))
+        if self.window():
+            self.window().adjustSize()
 
     def setSuggestion(self, suggestion):
         if self.is_updating:
@@ -90,12 +102,6 @@ class AutocompleteTextEdit(QTextEdit):
             self.current_suggestion = ""
             self.current_text = ""
             self.is_updating = False
-        elif event.key() == Qt.Key.Key_Return and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            # Allow new lines only with Ctrl+Enter
-            super().keyPressEvent(event)
-        elif event.key() == Qt.Key.Key_Return:
-            # Regular Enter updates the suggestion
-            event.accept()
         else:
             super().keyPressEvent(event)
 
@@ -107,13 +113,6 @@ class SuggestionWorker(QThread):
         super().__init__()
         self.text = text
         
-    def clean_suggestion(self, suggestion):
-        """Clean up the suggestion."""
-        # Remove any duplicate text from the start
-        if suggestion.startswith(self.text):
-            suggestion = suggestion[len(self.text):].lstrip()
-        return suggestion
-        
     def run(self):
         try:
             headers = {
@@ -122,49 +121,47 @@ class SuggestionWorker(QThread):
                 "anthropic-version": "2023-06-01"
             }
             
-            # Analyze if we're mid-word
-            words = self.text.split()
-            is_mid_word = len(words) > 0 and not self.text.endswith(' ')
-            last_word = words[-1] if words else ""
-            
-            if is_mid_word:
-                prompt = f"Complete this word or phrase naturally: {last_word}"
-            else:
-                prompt = f"Continue this text naturally with 2-5 words: {self.text}"
-            
             data = {
                 "model": "claude-3-haiku-20240307",
                 "messages": [{
                     "role": "user",
-                    "content": prompt
+                    "content": f"The user is typing and their cursor is at the end of this text. Complete it naturally from exactly where it ends, with no extra spaces: {self.text}<cursor>"
                 }],
-                "max_tokens": 20,
-                "temperature": 0.7,
-                "system": """You are a text completion assistant. Follow these rules strictly:
-1. If completing a partial word, only provide the rest of that word
-2. If continuing after a complete word, include appropriate spacing
-3. Never repeat what was already typed
-4. Provide natural, contextual continuations
-5. Keep responses very brief (2-5 words)"""
+                "max_tokens": 50,
+                "temperature": 0.1,
+                "system": """You are an autocomplete assistant. 
+                Your task is to continue text from exactly where 
+                the cursor is positioned. complete around 4-5 words, 
+                finishing the current word if necessary, and if not, 
+                starting a new word, or finishing a sentence, adding 
+                punctuation, whatever is appropriate. Make sure to add 
+                spaces between the completion and the original text if 
+                necessary so that original+completion is a coherent 
+                sentence. The completion should also never repeat the 
+                text that came before so that it can be seamlessly 
+                tacked on to the end of the original text.
+                """
             }
             
-            print("Sending API request with data:", data)
+            # Add timeout to prevent stalls
             response = requests.post(
                 "https://api.anthropic.com/v1/messages",
                 headers=headers,
-                json=data
+                json=data,
+                timeout=5.0  # 5 second timeout
             )
-            
-            print("Response status:", response.status_code)
-            print("Response headers:", response.headers)
             
             if response.status_code == 200:
                 result = response.json()
-                print("API Response:", result)
                 suggestion = result['content'][0]['text'].strip()
                 
+                # Remove the cursor marker if it's in the response
+                suggestion = suggestion.replace('<cursor>', '')
+                
                 # Clean up the suggestion
-                suggestion = self.clean_suggestion(suggestion)
+                if suggestion.startswith(self.text):
+                    suggestion = suggestion[len(self.text):]
+                suggestion = suggestion.lstrip()
                 
                 # Only emit if we have a meaningful suggestion
                 if suggestion:
@@ -178,6 +175,9 @@ class SuggestionWorker(QThread):
                 print(error_msg)
                 self.error_occurred.emit(error_msg)
                 
+        except requests.exceptions.Timeout:
+            print("API request timed out after 5 seconds")
+            self.error_occurred.emit("Request timed out")
         except Exception as e:
             error_msg = f"Error getting suggestion: {str(e)}"
             print(error_msg)
@@ -186,116 +186,44 @@ class SuggestionWorker(QThread):
 class AutocompleteWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Claude Autocomplete")
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowTitle("Claude")
+        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # Set window background
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f5f6fa;
-            }
-        """)
-        
-        # Create main container with padding
-        container = QWidget()
-        self.setCentralWidget(container)
-        
-        # Create outer layout with padding
-        outer_layout = QVBoxLayout(container)
-        outer_layout.setContentsMargins(20, 20, 20, 20)
-        outer_layout.setSpacing(15)
-        
-        # Create title label
-        title_label = QLabel("Claude Autocomplete")
-        title_label.setStyleSheet("""
-            QLabel {
-                color: #2c3e50;
-                font-size: 24px;
-                font-weight: bold;
-                margin-bottom: 10px;
-            }
-        """)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        outer_layout.addWidget(title_label)
-        
-        # Create description label
-        desc_label = QLabel("Get AI-powered text suggestions as you type")
-        desc_label.setStyleSheet("""
-            QLabel {
-                color: #7f8c8d;
-                font-size: 14px;
-                margin-bottom: 20px;
-            }
-        """)
-        desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        outer_layout.addWidget(desc_label)
-        
-        # Create modern frame for input area
-        input_frame = ModernFrame()
-        input_layout = QVBoxLayout(input_frame)
-        input_layout.setContentsMargins(15, 15, 15, 15)
-        input_layout.setSpacing(10)
-        
-        # Create input field
+        # Create input field directly as central widget
         self.input_field = AutocompleteTextEdit()
         self.input_field.textChanged.connect(self.on_text_changed)
-        input_layout.addWidget(self.input_field)
+        self.setCentralWidget(self.input_field)
         
-        # Create status label with modern styling
-        self.status_label = QLabel("Type to see suggestions • Press Tab to accept • Use Ctrl+Enter for new lines")
-        self.status_label.setStyleSheet("""
-            QLabel {
-                color: #7f8c8d;
-                font-size: 12px;
-                padding: 5px;
-                background-color: #f8f9fa;
-                border-radius: 4px;
-            }
-        """)
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        input_layout.addWidget(self.status_label)
-        
-        # Add input frame to outer layout
-        outer_layout.addWidget(input_frame)
-        
-        # Set window properties
-        self.setMinimumSize(700, 500)
+        # Center on screen
+        screen = QApplication.primaryScreen().geometry()
+        self.move(screen.center() - self.rect().center())
         
         # Initialize suggestion worker
         self.suggestion_worker = None
         
-        print("Application started. Type in the input field to see suggestions.")
-        print("Press Tab to accept a suggestion. Use Ctrl+Enter for new lines.")
-
-    def set_status(self, message, is_error=False):
-        style = """
-            QLabel {
-                color: %s;
-                font-size: 12px;
-                padding: 8px;
-                background-color: %s;
-                border-radius: 4px;
-                border: 1px solid %s;
+        # Set window shadow and opacity
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: transparent;
             }
-        """ % (
-            "#e74c3c" if is_error else "#7f8c8d",  # text color
-            "#fdf3f2" if is_error else "#f8f9fa",  # background color
-            "#fadbd8" if is_error else "#f8f9fa",  # border color
-        )
-        self.status_label.setStyleSheet(style)
-        self.status_label.setText(message)
+        """)
+
+    def adjustSize(self):
+        if self.input_field:
+            # Set window size to match text box exactly
+            self.setFixedSize(self.input_field.size())
 
     def on_text_changed(self):
         text = self.input_field.toPlainText()
         if len(text) >= 3 and not self.input_field.is_updating:
-            print(f"Getting suggestion for: {text}")
-            self.set_status("Getting suggestion...")
-            
             # Cancel previous worker if it exists
             if self.suggestion_worker and self.suggestion_worker.isRunning():
+                print("Cancelling previous suggestion worker")
                 self.suggestion_worker.terminate()
                 self.suggestion_worker.wait()
             
+            print(f"Starting new suggestion worker for text: {text}")
             # Create and start new worker
             self.suggestion_worker = SuggestionWorker(text)
             self.suggestion_worker.suggestion_ready.connect(self.on_suggestion_ready)
@@ -304,13 +232,24 @@ class AutocompleteWindow(QMainWindow):
 
     @pyqtSlot(str)
     def on_suggestion_ready(self, suggestion):
+        print(f"Received suggestion: {suggestion}")
         self.input_field.setSuggestion(suggestion)
-        self.set_status("Type to see suggestions • Press Tab to accept • Use Ctrl+Enter for new lines")
 
     @pyqtSlot(str)
     def on_error(self, error_msg):
-        self.set_status(f"Error: {error_msg}", is_error=True)
-        QMessageBox.warning(self, "API Error", error_msg)
+        print(f"Error: {error_msg}")
+        # Clear any partial suggestions
+        if self.input_field.current_suggestion:
+            self.input_field.current_suggestion = ""
+            self.input_field.setText(self.input_field.current_text)
+
+    def mousePressEvent(self, event):
+        self.oldPos = event.globalPosition().toPoint()
+
+    def mouseMoveEvent(self, event):
+        delta = event.globalPosition().toPoint() - self.oldPos
+        self.move(self.x() + delta.x(), self.y() + delta.y())
+        self.oldPos = event.globalPosition().toPoint()
 
 def main():
     # Check for API key before starting the app
