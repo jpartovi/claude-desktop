@@ -1,9 +1,9 @@
 import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QLabel, QVBoxLayout, 
-                            QWidget, QTextEdit, QMessageBox, QFrame)
+                            QWidget, QTextEdit, QMessageBox, QFrame, QHBoxLayout)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QFont, QPalette, QColor
+from PyQt6.QtGui import QFont, QPalette, QColor, QPainter, QFontMetrics
 import requests
 from dotenv import load_dotenv
 
@@ -28,27 +28,74 @@ class ModernFrame(QFrame):
             }
         """)
 
+class DragHandle(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(16, 16)
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw 6 dots in a 2x3 grid
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(120, 120, 120))  # Darker gray dots
+        
+        dot_size = 2
+        spacing_x = 4
+        spacing_y = 4
+        
+        # Calculate total grid height and center it vertically
+        grid_height = (3 * dot_size) + (2 * spacing_y)
+        start_y = (self.height() - grid_height) // 2
+        
+        # Center horizontally
+        start_x = (self.width() - (2 * dot_size + spacing_x)) // 2
+        
+        for row in range(3):
+            for col in range(2):
+                x = start_x + col * (dot_size + spacing_x)
+                y = start_y + row * (dot_size + spacing_y)
+                painter.drawEllipse(x, y, dot_size, dot_size)
+
 class AutocompleteTextEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.is_updating = False
         self.current_suggestion = ""
         self.current_text = ""
-        self.setMinimumWidth(200)
-        self.setMaximumWidth(400)
-        self.setMinimumHeight(40)
+        self.setMinimumWidth(300)
+        self.setMaximumWidth(500)
+        
+        # Set up font first so we can use it for height calculation
+        font = QFont("Helvetica Neue", 14)
+        self.setFont(font)
+        
+        # Calculate minimal height for one line
+        metrics = QFontMetrics(font)
+        line_height = metrics.height()  # Use height() for better vertical spacing
+        padding = 12  # Increased padding for better centering
+        natural_height = line_height + (padding * 2)
+        
+        self.setMinimumHeight(natural_height)
         self.setMaximumHeight(400)
         self.setPlaceholderText("Type for suggestions (Tab to accept)")
         self.document().documentLayout().documentSizeChanged.connect(self.adjust_height)
         
-        font = QFont("Helvetica Neue", 14)
-        self.setFont(font)
+        # Set up document formatting
+        self.document().setDocumentMargin(0)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        # Create and position the drag handle inside
+        self.drag_handle = DragHandle(self)
+        # Center the handle vertically
+        self.drag_handle.move(8, (natural_height - self.drag_handle.height()) // 2)
         
         self.setStyleSheet("""
             QTextEdit {
-                padding: 8px 12px;
+                padding: 12px 12px 12px 32px;
                 border: 1.5px solid #e0e0e0;
-                border-radius: 12px;
+                border-radius: 10px;
                 background-color: rgba(255, 255, 255, 0.95);
                 color: #2c3e50;
                 selection-background-color: #bdc3c7;
@@ -244,12 +291,18 @@ class AutocompleteWindow(QMainWindow):
             self.input_field.setText(self.input_field.current_text)
 
     def mousePressEvent(self, event):
-        self.oldPos = event.globalPosition().toPoint()
+        if self.input_field.drag_handle.geometry().contains(event.pos() - self.input_field.pos()):
+            self.oldPos = event.globalPosition().toPoint()
 
     def mouseMoveEvent(self, event):
-        delta = event.globalPosition().toPoint() - self.oldPos
-        self.move(self.x() + delta.x(), self.y() + delta.y())
-        self.oldPos = event.globalPosition().toPoint()
+        if hasattr(self, 'oldPos'):
+            delta = event.globalPosition().toPoint() - self.oldPos
+            self.move(self.x() + delta.x(), self.y() + delta.y())
+            self.oldPos = event.globalPosition().toPoint()
+
+    def mouseReleaseEvent(self, event):
+        if hasattr(self, 'oldPos'):
+            delattr(self, 'oldPos')
 
 def main():
     # Check for API key before starting the app
