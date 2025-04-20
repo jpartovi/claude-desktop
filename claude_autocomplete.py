@@ -108,18 +108,10 @@ class SuggestionWorker(QThread):
         self.text = text
         
     def clean_suggestion(self, suggestion):
-        """Clean up the suggestion and handle spacing appropriately."""
+        """Clean up the suggestion."""
         # Remove any duplicate text from the start
         if suggestion.startswith(self.text):
             suggestion = suggestion[len(self.text):].lstrip()
-        
-        # Add a space if the original text doesn't end with a space or punctuation
-        # and the suggestion doesn't start with punctuation
-        if (self.text and suggestion and 
-            not self.text.endswith((' ', '.', ',', '!', '?', ':', ';', '-', '(', '[', '{')) and
-            not suggestion.startswith(('.', ',', '!', '?', ':', ';', '-', ')', ']', '}'))):
-            suggestion = ' ' + suggestion
-            
         return suggestion
         
     def run(self):
@@ -130,15 +122,30 @@ class SuggestionWorker(QThread):
                 "anthropic-version": "2023-06-01"
             }
             
+            # Analyze if we're mid-word
+            words = self.text.split()
+            is_mid_word = len(words) > 0 and not self.text.endswith(' ')
+            last_word = words[-1] if words else ""
+            
+            if is_mid_word:
+                prompt = f"Complete this word or phrase naturally: {last_word}"
+            else:
+                prompt = f"Continue this text naturally with 2-5 words: {self.text}"
+            
             data = {
                 "model": "claude-3-haiku-20240307",
                 "messages": [{
                     "role": "user",
-                    "content": f"Complete this text with a natural continuation (2-5 words). Only output the continuation, do not repeat any part of: {self.text}"
+                    "content": prompt
                 }],
                 "max_tokens": 20,
                 "temperature": 0.7,
-                "system": "You are a text completion assistant. Only provide the next few words that would naturally continue the text. Never repeat what was already typed. Be mindful of spacing and punctuation."
+                "system": """You are a text completion assistant. Follow these rules strictly:
+1. If completing a partial word, only provide the rest of that word
+2. If continuing after a complete word, include appropriate spacing
+3. Never repeat what was already typed
+4. Provide natural, contextual continuations
+5. Keep responses very brief (2-5 words)"""
             }
             
             print("Sending API request with data:", data)
@@ -156,7 +163,7 @@ class SuggestionWorker(QThread):
                 print("API Response:", result)
                 suggestion = result['content'][0]['text'].strip()
                 
-                # Clean up the suggestion and handle spacing
+                # Clean up the suggestion
                 suggestion = self.clean_suggestion(suggestion)
                 
                 # Only emit if we have a meaningful suggestion
